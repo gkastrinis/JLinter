@@ -36,23 +36,22 @@ function lint()
         for file in files
             endswith(file, ".jl") || continue
             path = joinpath(base, file)
+            # base = "src"
             # path = "src/Main.jl"
             # @info "Parsing $path..."
-
-            f = Info(base_path = base, name = path)
-            all_info[path] = f
+            all_info[path] = f = Info(base_path = base, name = path)
             ast = Meta.parseall(read(path, String); filename = path)
             _walk(ast, f)
         end
     end
 
     for (fname, f) in all_info
-        # contains(f.base_path, "UpdateAPI") || continue
         for dep in f.usings
-            _find(dep, f, all_info) || @warn "($(f.name)): `using` $dep unused"
+            _find(dep, f, all_info) #|| @warn "($(f.name)): `using $dep` unused"
         end
     end
 end
+
 
 function mk_dep(root::Symbol, unit::Symbol, f::Info)
     if startswith(string(root), ".")
@@ -193,15 +192,13 @@ end
 # `using`/`import` X: bar -> ... `bar`
 # `using`/`import` X -> ... `X`
 function _find(dep::Dep, f::Info, all_info)
-    if dep.unit == DUMMY_SYM
-        @warn "HANLDE THIS $(f.name) $dep"
-    else
-        # @info "searching for $(dep.unit) in $(f.name)"
-        dep.unit in f.symbols && return true
-    end
+    filter = (dep.unit == DUMMY_SYM ? dep.root : dep.unit)
+    (filter in f.symbols) && return true
+
     for included_file in f.includes
         included_info = all_info[included_file]
-        _find(dep, included_info, all_info) && return true
+        found = _find(dep, included_info, all_info)
+        found && return true
     end
     return false
 end
