@@ -3,7 +3,7 @@ module JLinter
 const DUMMY_SYM = Symbol("")
 
 Base.@kwdef struct Dep
-    root::Symbol
+    root::String
     unit::Symbol
 end
 
@@ -31,6 +31,7 @@ end
 
 function lint()
     all_info = Dict{String, Info}()
+    included_by = Dict{String, String}()
 
     for (base, dirs, files) in walkdir("src")
         for file in files
@@ -42,19 +43,51 @@ function lint()
             all_info[path] = f = Info(base_path = base, name = path)
             ast = Meta.parseall(read(path, String); filename = path)
             _walk(ast, f)
+
+            for included_file in f.includes
+                @assert !haskey(included_by, included_file)
+                included_by[included_file] = f.name
+            end
         end
+    end
+
+    check = (dep::Dep, f::Info, kind::String) -> begin
+        # `using`/`import` X: bar -> ... `bar`
+        # `using`/`import` X -> ... `X`
+        found = _find(dep, f, all_info)
+        if !found && haskey(included_by, f.name)
+            parent_info = all_info[included_by[f.name]]
+            found = _find(dep, parent_info, all_info)
+            found && @warn "($(f.name)): `$kind $dep` used indirectly"
+        end
+        # !found && @warn "($(f.name)): `$kind $dep` unused"
     end
 
     for (fname, f) in all_info
         for dep in f.usings
-            _find(dep, f, all_info) #|| @warn "($(f.name)): `using $dep` unused"
+            check(dep, f, "using")
+        end
+        for dep in f.imports
+            check(dep, f, "import")
         end
     end
 end
 
 
-function mk_dep(root::Symbol, unit::Symbol, f::Info)
-    if startswith(string(root), ".")
+function _find(dep::Dep, f::Info, all_info)
+    filter = (dep.unit == DUMMY_SYM ? last(split(dep.root, ".")) : dep.unit)
+    (filter in f.symbols) && return true
+
+    for included_file in f.includes
+        haskey(all_info, included_file) || continue
+        included_info = all_info[included_file]
+        _find(dep, included_info, all_info) && return true
+    end
+    return false
+end
+
+function mk_dep(root::String, unit::Symbol, f::Info)
+    if startswith(root, ".")
         # @warn "$(f.name): Refrain from using relative paths in module names ($root)"
     end
     return Dep(root = root, unit = unit)
@@ -70,12 +103,12 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
         @assert length(e.args) == 1
         base = e.args[1]
         # `import`/`using` $root: $unit...
-        root = _sym(base.args[1].args)
+        root = _join(base.args[1].args)
         units = @view base.args[2:end]
         for arg in units
             @assert arg.head == Symbol(".")
             @assert length(arg.args) == 1
-            push!(collection, mk_dep(root, _sym(arg.args), f))
+            push!(collection, mk_dep(root, Symbol(_join(arg.args)), f))
         end
         if e.head == :import
             # @warn "$(f.name): Refrain from using qualified `import` ($root $(_str(units)))"
@@ -89,7 +122,7 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
         end
         for arg in e.args
             @assert arg.head == Symbol(".")
-            push!(collection, mk_dep(_sym(arg.args), DUMMY_SYM, f))
+            push!(collection, mk_dep(_join(arg.args), DUMMY_SYM, f))
         end
     end
 end
@@ -161,15 +194,21 @@ end
 
 _walk(a, f::Info) = nothing
 
-_sym(args::Array) = Symbol(reduce((x, y) -> begin string(x) * string(y) end, args))
+function _join(args::Array)
+    length(args) == 1 && return string(args[1])
+    foldl((x, y) -> begin
+        str_x = string(x)
+        str_y = string(y)
+        startswith(str_x, ".") && return str_x * str_y
+        return str_x * "." * str_y
+    end, args)
+end
 
-_sym(e::Expr) = _sym(e.args)
-
-_sym(s::AbstractString) = Symbol(s)
+_join(e::Expr) = _join(e.args)
 
 function _str(args::AbstractArray)
-    length(args) == 1 && return string(_sym(args[1].args))
-    reduce((x, y) -> begin string(_sym(x)) * ", " * string(_sym(y)) end, args)
+    length(args) == 1 && return _join(args[1].args)
+    reduce((x, y) -> begin _join(x) * ", " * _join(y) end, args)
 end
 
 const to_skip = Set{Symbol}([
@@ -188,20 +227,5 @@ function _add_sym(s::Symbol, set::Set{Symbol})
     s in to_skip && return
     push!(set, s)
 end
-
-# `using`/`import` X: bar -> ... `bar`
-# `using`/`import` X -> ... `X`
-function _find(dep::Dep, f::Info, all_info)
-    filter = (dep.unit == DUMMY_SYM ? dep.root : dep.unit)
-    (filter in f.symbols) && return true
-
-    for included_file in f.includes
-        included_info = all_info[included_file]
-        found = _find(dep, included_info, all_info)
-        found && return true
-    end
-    return false
-end
-
 
 end
