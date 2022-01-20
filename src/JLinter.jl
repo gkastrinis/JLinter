@@ -2,6 +2,7 @@ module JLinter
 
 const DUMMY_SYM = Symbol("")
 
+# `import`/`using` $root: $unit...
 Base.@kwdef struct Dep
     root::String
     unit::Symbol
@@ -28,8 +29,24 @@ Base.@kwdef mutable struct Info
     curr_fun::Symbol = DUMMY_SYM
 end
 
+@enum ConfigOption begin
+    LOAD_INDIRECT
+    LOAD_UNUSED
+    LOAD_RELATIVE
+    IMPORT_MULTIPLE
+    IMPORT_QUAL
+    USING_UNQUAL
+    MODULE_DIR_NAME
+    RETURN_IMPLICIT
+end
 
-function lint()
+#####################################################
+
+const CONF = Set{ConfigOption}()
+
+function lint(options::Vector)
+    union!(CONF, options)
+
     all_info = Dict{String, Info}()
     included_by = Dict{String, String}()
 
@@ -58,18 +75,18 @@ function lint()
         if !found && haskey(included_by, f.name)
             parent_info = all_info[included_by[f.name]]
             found = _find(dep, parent_info, all_info)
-            found && @warn "($(f.name)): `$kind $dep` used indirectly"
+            if found && LOAD_INDIRECT in CONF
+                @warn "($(f.name)): `$kind $dep` used indirectly"
+            end
         end
-        # !found && @warn "($(f.name)): `$kind $dep` unused"
+        if !found && LOAD_UNUSED in CONF
+            @warn "($(f.name)): `$kind $dep` unused"
+        end
     end
 
     for (fname, f) in all_info
-        for dep in f.usings
-            check(dep, f, "using")
-        end
-        for dep in f.imports
-            check(dep, f, "import")
-        end
+        for dep in f.usings check(dep, f, "using") end
+        for dep in f.imports check(dep, f, "import") end
     end
 end
 
@@ -87,8 +104,8 @@ function _find(dep::Dep, f::Info, all_info)
 end
 
 function mk_dep(root::String, unit::Symbol, f::Info)
-    if startswith(root, ".")
-        # @warn "$(f.name): Refrain from using relative paths in module names ($root)"
+    if startswith(root, ".") && LOAD_RELATIVE in CONF
+        @warn "$(f.name): Refrain from using relative paths in module names ($root)"
     end
     return Dep(root = root, unit = unit)
 end
@@ -102,7 +119,6 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
     if e.args[1].head == Symbol(":")
         @assert length(e.args) == 1
         base = e.args[1]
-        # `import`/`using` $root: $unit...
         root = _join(base.args[1].args)
         units = @view base.args[2:end]
         for arg in units
@@ -110,15 +126,15 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
             @assert length(arg.args) == 1
             push!(collection, mk_dep(root, Symbol(_join(arg.args)), f))
         end
-        if e.head == :import
-            # @warn "$(f.name): Refrain from using qualified `import` ($root $(_str(units)))"
+        if e.head == :import && IMPORT_QUAL in CONF
+            @warn "$(f.name): Refrain from using qualified `import` ($root $(_str(units)))"
         end
     else
-        if e.head == :using
-            # @warn "$(f.name): Refrain from using unqualified `using` ($(_str(e.args)))"
+        if e.head == :using && USING_UNQUAL in CONF
+            @warn "$(f.name): Refrain from using unqualified `using` ($(_str(e.args)))"
         end
-        if length(e.args) > 1
-            # @warn "$(f.name): Unqualified `import` has multiple IDs ($(_str(e.args))) in one line"
+        if length(e.args) > 1 && IMPORT_MULTIPLE in CONF
+            @warn "$(f.name): Unqualified `import` has multiple IDs ($(_str(e.args))) in one line"
         end
         for arg in e.args
             @assert arg.head == Symbol(".")
@@ -140,8 +156,8 @@ function _walk(e::Expr, f::Info)
         _walk(e.args, f)
 
         parent_dir = splitpath(f.name)[end-1]
-        if parent_dir != "src" && parent_dir != string(f.curr_mod)
-            # @warn "Module `$(f.curr_mod)` doesn't match parent directory name (`$parent_dir`)"
+        if parent_dir != "src" && parent_dir != string(f.curr_mod) && MODULE_DIR_NAME in CONF
+            @warn "$(f.name): Module `$(f.curr_mod)` doesn't match parent directory name (`$parent_dir`)"
         end
 
         f.curr_mod = DUMMY_SYM
@@ -151,8 +167,8 @@ function _walk(e::Expr, f::Info)
             name = e.args[1].args[1]
             @assert e.args[2].head == :block
             l = last(e.args[2].args)
-            if !(l isa Expr && l.head == :return)
-                # @warn "Explicit `return` missing in `$name`"
+            if !(l isa Expr && l.head == :return) && RETURN_IMPLICIT in CONF
+                @warn "$(f.name): Explicit `return` missing in `$name`"
             end
         end
         _walk(e.args, f)
@@ -177,11 +193,9 @@ _walk(s::Symbol, f::Info) = _add_sym(s, f.symbols)
 
 _walk(args::Array, f::Info) = for arg in args _walk(arg, f) end
 
-const valid_global = Set{Symbol}([Symbol("@doc"), Symbol("@cmd")])
-
 function _walk(ref::GlobalRef, f::Info)
     @assert ref.mod == Core
-    @assert ref.name in valid_global
+    @assert ref.name in [Symbol("@doc"), Symbol("@cmd")]
     return nothing
 end
 
@@ -205,6 +219,8 @@ function _join(args::Array)
 end
 
 _join(e::Expr) = _join(e.args)
+
+_join(e::AbstractString) = e
 
 function _str(args::AbstractArray)
     length(args) == 1 && return _join(args[1].args)
