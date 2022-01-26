@@ -40,7 +40,6 @@ end
 
 #####################################################
 
-# TODO short form functions
 # TODO isnothing etc
 # TODO return type coersion
 
@@ -60,6 +59,7 @@ function lint(options::Vector)
             all_info[path] = f = Info(base_path = base, name = path)
             ast = Meta.parseall(read(path, String); filename = path)
             _walk(ast, f)
+            dump(ast.args[4].args[4].args[3].args[3])
 
             for included_file in f.includes
                 @assert !haskey(included_by, included_file)
@@ -159,6 +159,7 @@ function _walk(e::Expr, f::Info)
         if parent_dir != "src" && parent_dir != string(f.mod) && MODULE_DIR_NAME in CONF
             @warn "$(f.name): Module `$(f.mod)` doesn't match parent directory name (`$parent_dir`)"
         end
+    # NOTE: a short form function definition has "=" as the head symbol
     elseif e.head == :function
         # It has a non-trivial body
         if length(e.args) > 1
