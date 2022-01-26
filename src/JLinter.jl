@@ -36,12 +36,13 @@ end
     USING_UNQUAL
     MODULE_DIR_NAME
     RETURN_IMPLICIT
+    RETURN_COERSION
 end
 
 #####################################################
 
-# TODO isnothing etc
-# TODO return type coersion
+# TODO isnothing
+# TODO more...
 
 const CONF = Set{ConfigOption}()
 
@@ -158,7 +159,7 @@ function _walk(e::Expr, f::Info)
         if parent_dir != "src" && parent_dir != string(f.mod) && MODULE_DIR_NAME in CONF
             @warn "$(f.name): Module `$(f.mod)` doesn't match parent directory name (`$parent_dir`)"
         end
-    # NOTE: a short form function definition has "=" as the head symbol
+    # A short form function definition has "=" as the head symbol
     elseif e.head == :function
         # It has a non-trivial body
         if length(e.args) > 1
@@ -167,6 +168,9 @@ function _walk(e::Expr, f::Info)
             l = last(e.args[2].args)
             if !(l isa Expr && l.head == :return) && RETURN_IMPLICIT in CONF
                 @warn "$(f.name): Explicit `return` missing in `$name`"
+            end
+            if RETURN_COERSION in CONF && e.args[1].head == Symbol("::")
+                @warn "$(f.name): Return-type annotation in `$name` is a type-coersion"
             end
         end
         _walk(e.args, f)
