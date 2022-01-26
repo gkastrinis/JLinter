@@ -144,7 +144,6 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
 end
 
 function _walk(e::Expr, f::Info)
-    global curr_mod
     @assert e.head isa Symbol
     if e.head == :module
         @assert e.args[1] == true
@@ -158,7 +157,7 @@ function _walk(e::Expr, f::Info)
 
         parent_dir = splitpath(f.name)[end-1]
         if parent_dir != "src" && parent_dir != string(f.mod) && MODULE_DIR_NAME in CONF
-            @warn "$(f.name): Module `$curr_mod` doesn't match parent directory name (`$parent_dir`)"
+            @warn "$(f.name): Module `$(f.mod)` doesn't match parent directory name (`$parent_dir`)"
         end
     elseif e.head == :function
         # It has a non-trivial body
