@@ -59,7 +59,6 @@ function lint(options::Vector)
             all_info[path] = f = Info(base_path = base, name = path)
             ast = Meta.parseall(read(path, String); filename = path)
             _walk(ast, f)
-            dump(ast.args[4].args[4].args[3].args[3])
 
             for included_file in f.includes
                 @assert !haskey(included_by, included_file)
