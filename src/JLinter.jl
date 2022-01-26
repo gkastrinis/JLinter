@@ -25,6 +25,8 @@ Base.@kwdef mutable struct Info
     usings::Set{Dep} = Set{Dep}()
     exports::Set{Symbol} = Set{Symbol}()
     includes::Vector{String} = Vector{String}()
+
+    warn::Set{String} = Set{String}()
 end
 
 @enum ConfigOption begin
@@ -77,17 +79,21 @@ function lint(options::Vector)
             parent_info = all_info[included_by[f.name]]
             found = _find(dep, parent_info, all_info)
             if found && LOAD_INDIRECT in CONF
-                @warn "($(f.name)): `$kind $dep` used indirectly"
+                push!(f.warn, "($(f.name)): `$kind $dep` used indirectly")
             end
         end
         if !found && LOAD_UNUSED in CONF
-            @warn "($(f.name)): `$kind $dep` unused"
+            push!(f.warn, "($(f.name)): `$kind $dep` unused")
         end
     end
 
     for (fname, f) in all_info
         for dep in f.usings check(dep, f, "using") end
         for dep in f.imports check(dep, f, "import") end
+
+        for w in f.warn
+            @warn w
+        end
     end
 end
 
@@ -106,7 +112,7 @@ end
 
 function mk_dep(root::String, unit::Symbol, f::Info)
     if startswith(root, ".") && LOAD_RELATIVE in CONF
-        @warn "$(f.name): Refrain from using relative paths in module names ($root)"
+        push!(f.warn, "$(f.name): Refrain from using relative paths in module names ($root)")
     end
     return Dep(root = root, unit = unit)
 end
@@ -128,14 +134,14 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
             push!(collection, mk_dep(root, Symbol(_join(arg.args)), f))
         end
         if e.head == :import && IMPORT_QUAL in CONF
-            @warn "$(f.name): Refrain from using qualified `import` ($root $(_str(units)))"
+            push!(f.warn, "$(f.name): Refrain from using qualified `import` ($root $(_str(units)))")
         end
     else
         if e.head == :using && USING_UNQUAL in CONF
-            @warn "$(f.name): Refrain from using unqualified `using` ($(_str(e.args)))"
+            push!(f.warn, "$(f.name): Refrain from using unqualified `using` ($(_str(e.args)))")
         end
         if length(e.args) > 1 && IMPORT_MULTIPLE in CONF
-            @warn "$(f.name): Unqualified `import` has multiple IDs ($(_str(e.args))) in one line"
+            push!(f.warn, "$(f.name): Unqualified `import` has multiple IDs ($(_str(e.args))) in one line")
         end
         for arg in e.args
             @assert arg.head == Symbol(".")
@@ -158,7 +164,7 @@ function _walk(e::Expr, f::Info)
 
         parent_dir = splitpath(f.name)[end-1]
         if parent_dir != "src" && parent_dir != string(f.mod) && MODULE_DIR_NAME in CONF
-            @warn "$(f.name): Module `$(f.mod)` doesn't match parent directory name (`$parent_dir`)"
+            push!(f.warn, "$(f.name): Module `$(f.mod)` doesn't match parent directory name (`$parent_dir`)")
         end
     # A short form function definition has "=" as the head symbol
     elseif e.head == :function
@@ -168,10 +174,10 @@ function _walk(e::Expr, f::Info)
             @assert e.args[2].head == :block
             l = last(e.args[2].args)
             if !(l isa Expr && l.head == :return) && RETURN_IMPLICIT in CONF
-                @warn "$(f.name): Explicit `return` missing in `$name`"
+                push!(f.warn, "$(f.name): Explicit `return` missing in `$name`")
             end
             if RETURN_COERSION in CONF && e.args[1].head == Symbol("::")
-                @warn "$(f.name): Return-type annotation in `$name` is a type-coersion"
+                push!(f.warn, "$(f.name): Return-type annotation in `$name` is a type-coersion")
             end
         end
         _walk(e.args, f)
