@@ -47,6 +47,7 @@ end
 const CONF = Set{ConfigOption}()
 
 function lint(options::Vector)
+    empty!(CONF)
     union!(CONF, options)
 
     all_info = Dict{String, Info}()
