@@ -18,15 +18,13 @@ end
 Base.@kwdef mutable struct Info
     base_path::String
     name::String
+    mod::Symbol = DUMMY_SYM
     symbols::Set{Symbol} = Set{Symbol}()
     mods::Set{Symbol} = Set{Symbol}()
     imports::Set{Dep} = Set{Dep}()
     usings::Set{Dep} = Set{Dep}()
     exports::Set{Symbol} = Set{Symbol}()
     includes::Vector{String} = Vector{String}()
-
-    curr_mod::Symbol = DUMMY_SYM
-    curr_fun::Symbol = DUMMY_SYM
 end
 
 @enum ConfigOption begin
@@ -42,6 +40,10 @@ end
 
 #####################################################
 
+# TODO short form functions
+# TODO isnothing etc
+# TODO return type coersion
+
 const CONF = Set{ConfigOption}()
 
 function lint(options::Vector)
@@ -53,10 +55,8 @@ function lint(options::Vector)
     for (base, dirs, files) in walkdir("src")
         for file in files
             endswith(file, ".jl") || continue
+
             path = joinpath(base, file)
-            # base = "src"
-            # path = "src/Main.jl"
-            # @info "Parsing $path..."
             all_info[path] = f = Info(base_path = base, name = path)
             ast = Meta.parseall(read(path, String); filename = path)
             _walk(ast, f)
@@ -144,23 +144,22 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
 end
 
 function _walk(e::Expr, f::Info)
+    global curr_mod
     @assert e.head isa Symbol
     if e.head == :module
         @assert e.args[1] == true
         @assert e.args[3] isa Expr
         @assert length(e.args) == 3
-        @assert f.curr_mod == DUMMY_SYM
+        @assert f.mod == DUMMY_SYM
 
         push!(f.mods, e.args[2])
-        f.curr_mod = e.args[2]
+        f.mod = e.args[2]
         _walk(e.args, f)
 
         parent_dir = splitpath(f.name)[end-1]
-        if parent_dir != "src" && parent_dir != string(f.curr_mod) && MODULE_DIR_NAME in CONF
-            @warn "$(f.name): Module `$(f.curr_mod)` doesn't match parent directory name (`$parent_dir`)"
+        if parent_dir != "src" && parent_dir != string(f.mod) && MODULE_DIR_NAME in CONF
+            @warn "$(f.name): Module `$curr_mod` doesn't match parent directory name (`$parent_dir`)"
         end
-
-        f.curr_mod = DUMMY_SYM
     elseif e.head == :function
         # It has a non-trivial body
         if length(e.args) > 1
@@ -189,7 +188,7 @@ function _walk(e::Expr, f::Info)
     return nothing
 end
 
-_walk(s::Symbol, f::Info) = _add_sym(s, f.symbols)
+_walk(s::Symbol, f::Info) = push!(f.symbols, s)
 
 _walk(args::Array, f::Info) = for arg in args _walk(arg, f) end
 
@@ -203,7 +202,7 @@ _walk(l::LineNumberNode, f::Info) = nothing
 
 function _walk(q::QuoteNode, f::Info)
     q.value isa Symbol || return
-    _add_sym(q.value, f.symbols)
+    push!(f.symbols, q.value)
 end
 
 _walk(a, f::Info) = nothing
@@ -225,23 +224,6 @@ _join(e::AbstractString) = e
 function _str(args::AbstractArray)
     length(args) == 1 && return _join(args[1].args)
     reduce((x, y) -> begin _join(x) * ", " * _join(y) end, args)
-end
-
-const to_skip = Set{Symbol}([
-    Symbol("@__DIR__"), Symbol("@v_str"), Symbol("@warn"), :nothing,
-    Symbol("="), Symbol("<"), Symbol("=="), Symbol("≈"), Symbol("≥"),
-    Symbol("+"), Symbol("-"), Symbol("*"), Symbol("/"), Symbol("%"), Symbol("!"),
-    Symbol(">>"), Symbol("<<"), Symbol("=>"), Symbol("~"), Symbol("^"), Symbol("÷"),
-    Symbol("|"), Symbol("&"), Symbol("||"), Symbol("&&"), Symbol(".+"), Symbol(".!"),
-    Symbol("⊆"), Symbol("⊇"), Symbol("≤"), Symbol("⊔"), Symbol("⊓"),
-    Symbol("∉"), Symbol("∈"), :in, Symbol("∧"), Symbol("∨"), Symbol("∩"), Symbol("∪"),
-    Symbol("Int"), Symbol("Int64"), Symbol("Float"), Symbol("Float64"),
-    Symbol("./"), Symbol(".=>"), Symbol("."), Symbol(":"), Symbol("::"), Symbol("\$"),
-])
-
-function _add_sym(s::Symbol, set::Set{Symbol})
-    s in to_skip && return
-    push!(set, s)
 end
 
 end
