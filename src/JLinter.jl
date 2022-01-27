@@ -87,6 +87,7 @@ function lint(options::Vector)
         end
     end
 
+    total_warns = 0
     for (fname, f) in all_info
         for dep in f.usings check(dep, f, "using") end
         for dep in f.imports check(dep, f, "import") end
@@ -94,7 +95,9 @@ function lint(options::Vector)
         for w in f.warn
             @warn w
         end
+        total_warns += length(f.warn)
     end
+    @info "Total Warnings: $total_warns"
 end
 
 
@@ -134,7 +137,7 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
             push!(collection, mk_dep(root, Symbol(_join(arg.args)), f))
         end
         if e.head == :import && IMPORT_QUAL in CONF
-            push!(f.warn, "$(f.name): Refrain from using qualified `import` ($root $(_str(units)))")
+            push!(f.warn, "$(f.name): Refrain from using qualified `import` ($root $(_str(units))) (use only to extend)")
         end
     else
         if e.head == :using && USING_UNQUAL in CONF
