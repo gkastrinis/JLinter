@@ -24,9 +24,10 @@ Base.@kwdef mutable struct Info
     imports::Set{Dep} = Set{Dep}()
     usings::Set{Dep} = Set{Dep}()
     exports::Set{Symbol} = Set{Symbol}()
-    includes::Vector{String} = Vector{String}()
+    includes::Set{String} = Set{String}()
 
-    warn::Set{String} = Set{String}()
+    pending_imports::Set{Dep} = Set{Dep}()
+    warns::Set{String} = Set{String}()
 end
 
 @enum ConfigOption begin
@@ -42,9 +43,6 @@ end
 end
 
 #####################################################
-
-# TODO isnothing
-# TODO more...
 
 const CONF = Set{ConfigOption}()
 
@@ -79,11 +77,11 @@ function lint(options::Vector)
             parent_info = all_info[included_by[f.name]]
             found = _find(dep, parent_info, all_info)
             if found && LOAD_INDIRECT in CONF
-                push!(f.warn, "($(f.name)): `$kind $dep` used indirectly")
+                push!(f.warns, "($(f.name)): `$kind $dep` used indirectly")
             end
         end
         if !found && LOAD_UNUSED in CONF
-            push!(f.warn, "($(f.name)): `$kind $dep` unused")
+            push!(f.warns, "($(f.name)): `$kind $dep` unused")
         end
     end
 
@@ -92,10 +90,13 @@ function lint(options::Vector)
         for dep in f.usings check(dep, f, "using") end
         for dep in f.imports check(dep, f, "import") end
 
-        for w in f.warn
+        for dep in f.pending_imports
+            push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep) (use only to extend)")
+        end
+        for w in f.warns
             @warn w
         end
-        total_warns += length(f.warn)
+        total_warns += length(f.warns)
     end
     @info "Total Warnings: $total_warns"
 end
@@ -113,9 +114,9 @@ function _find(dep::Dep, f::Info, all_info)
     return false
 end
 
-function mk_dep(root::String, unit::Symbol, f::Info)
+function mk_dep(root::AbstractString, unit::Symbol, f::Info)
     if startswith(root, ".") && LOAD_RELATIVE in CONF
-        push!(f.warn, "$(f.name): Refrain from using relative paths in module names ($root)")
+        push!(f.warns, "$(f.name): Refrain from using relative paths in module names ($root)")
     end
     return Dep(root = root, unit = unit)
 end
@@ -137,14 +138,17 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
             push!(collection, mk_dep(root, Symbol(_join(arg.args)), f))
         end
         if e.head == :import && IMPORT_QUAL in CONF
-            push!(f.warn, "$(f.name): Refrain from using qualified `import` ($root $(_str(units))) (use only to extend)")
+            for unit in units
+                @assert length(unit.args) == 1
+                push!(f.pending_imports, mk_dep(split(root, ".")[end], unit.args[1], f))
+            end
         end
     else
         if e.head == :using && USING_UNQUAL in CONF
-            push!(f.warn, "$(f.name): Refrain from using unqualified `using` ($(_str(e.args)))")
+            push!(f.warns, "$(f.name): Refrain from using unqualified `using` ($(_str(e.args)))")
         end
         if length(e.args) > 1 && IMPORT_MULTIPLE in CONF
-            push!(f.warn, "$(f.name): Unqualified `import` has multiple IDs ($(_str(e.args))) in one line")
+            push!(f.warns, "$(f.name): Unqualified `import` has multiple IDs ($(_str(e.args))) in one line")
         end
         for arg in e.args
             @assert arg.head == Symbol(".")
@@ -153,7 +157,12 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
     end
 end
 
+in_function_def = false
+function_name = ""
+
 function _walk(e::Expr, f::Info)
+    global in_function_def, function_name
+
     @assert e.head isa Symbol
     if e.head == :module
         @assert e.args[1] == true
@@ -163,42 +172,52 @@ function _walk(e::Expr, f::Info)
 
         push!(f.mods, e.args[2])
         f.mod = e.args[2]
-        _walk(e.args, f)
-
-        parent_dir = splitpath(f.name)[end-1]
-        if parent_dir != "src" && parent_dir != string(f.mod) && MODULE_DIR_NAME in CONF
-            push!(f.warn, "$(f.name): Module `$(f.mod)` doesn't match parent directory name (`$parent_dir`)")
-        end
-    # A short form function definition has "=" as the head symbol
+    # NOTE: A short form function definition has "=" as the head symbol
     elseif e.head == :function
+        in_function_def = true
         # It has a non-trivial body
         if length(e.args) > 1
-            name = e.args[1].args[1]
             @assert e.args[2].head == :block
             l = last(e.args[2].args)
             if !(l isa Expr && l.head == :return) && RETURN_IMPLICIT in CONF
-                push!(f.warn, "$(f.name): Explicit `return` missing in `$name`")
-            end
-            if RETURN_COERSION in CONF && e.args[1].head == Symbol("::")
-                push!(f.warn, "$(f.name): Return-type annotation in `$name` is a type-coersion")
+                push!(f.warns, "$(f.name): Explicit `return` missing in `$name`")
             end
         end
-        _walk(e.args, f)
+
+    elseif in_function_def && e.head == :call
+        name = e.args[1]
+        name = (name isa Expr && name.head == :curly) ? name.args[1] : name
+        function_name = name
+        # Check that `name` is a complex expression (e.g., Foo.bar)
+        if IMPORT_QUAL in CONF && name isa Expr && name.head == Symbol(".")
+            t = Dep(string(name.args[1]), name.args[2].value)
+            t in f.pending_imports && delete!(f.pending_imports, t)
+        end
+
+    elseif e.head == :call && e.args[1] == :include
+        push!(f.includes, joinpath(f.base_path, e.args[2]))
     elseif e.head == :import
         _load(e, f.imports, f)
-        return
     elseif e.head == :using
         _load(e, f.usings, f)
-        return
     elseif e.head == :export
         union!(f.exports, e.args)
-    elseif e.head == :call && e.args[1] == :include
-
-        push!(f.includes, joinpath(f.base_path, e.args[2]))
-    else
-        _walk(e.args, f)
     end
-    return nothing
+
+    _walk(e.args, f)
+
+    if e.head == :module
+        parent_dir = splitpath(f.name)[end-1]
+        if parent_dir != "src" && parent_dir != string(f.mod) && MODULE_DIR_NAME in CONF
+            push!(f.warns, "$(f.name): Module `$(f.mod)` doesn't match parent directory name (`$parent_dir`)")
+        end
+    elseif e.head == :function
+        in_function_def = false
+    elseif e.head == Symbol("::")
+        if in_function_def && e.args[1] isa Expr && e.args[1].head == :call && RETURN_COERSION in CONF
+            push!(f.warns, "$(f.name): Return-type annotation in `$function_name` is a type-coersion")
+        end
+    end
 end
 
 _walk(s::Symbol, f::Info) = push!(f.symbols, s)
