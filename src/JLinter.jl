@@ -25,6 +25,7 @@ Base.@kwdef mutable struct Info
     usings::Set{Dep} = Set{Dep}()
     exports::Set{Symbol} = Set{Symbol}()
     includes::Set{String} = Set{String}()
+    function_defs::Set{String} = Set{String}()
 
     pending_imports::Set{Dep} = Set{Dep}()
     warns::Set{String} = Set{String}()
@@ -90,12 +91,22 @@ function lint(options::Vector)
         for dep in f.usings check(dep, f, "using") end
         for dep in f.imports check(dep, f, "import") end
 
-        for dep in f.pending_imports
-            push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep) (use only to extend)")
+        if IMPORT_QUAL in CONF
+            for dep in f.pending_imports
+                unit_str = string(dep.unit)
+                # First search for `X.foo`
+                (dep.root * "." * unit_str) in f.function_defs && continue
+                # Then for `foo` alone -- warn
+                found = unit_str in f.function_defs
+                if found
+                    # @warn "$(f.name): Refrain from extending methods (`$unit_str`) without qualification"
+                    continue
+                end
+                push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep) (use only to extend)")
+            end
         end
-        for w in f.warns
-            @warn w
-        end
+
+        for w in f.warns @warn w end
         total_warns += length(f.warns)
     end
     @info "Total Warnings: $total_warns"
@@ -158,10 +169,11 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
 end
 
 in_function_def = false
+block_count = 0
 function_name = ""
 
 function _walk(e::Expr, f::Info)
-    global in_function_def, function_name
+    global in_function_def, block_count, function_name
 
     @assert e.head isa Symbol
     if e.head == :module
@@ -172,7 +184,6 @@ function _walk(e::Expr, f::Info)
 
         push!(f.mods, e.args[2])
         f.mod = e.args[2]
-    # NOTE: A short form function definition has "=" as the head symbol
     elseif e.head == :function
         in_function_def = true
         # It has a non-trivial body
@@ -183,17 +194,28 @@ function _walk(e::Expr, f::Info)
                 push!(f.warns, "$(f.name): Explicit `return` missing in `$name`")
             end
         end
-
-    elseif in_function_def && e.head == :call
+    # A short form function definition has "=" as the head symbol
+    elseif e.head == Symbol("=") && block_count == 0
+        in_function_def = true
+    elseif e.head == :block
+        block_count += 1
+    # Function definitions are calls in the AST
+    # Need to differentiate from normal method calls
+    elseif in_function_def && block_count == 0 && e.head == :call
         name = e.args[1]
         name = (name isa Expr && name.head == :curly) ? name.args[1] : name
-        function_name = name
-        # Check that `name` is a complex expression (e.g., Foo.bar)
-        if IMPORT_QUAL in CONF && name isa Expr && name.head == Symbol(".")
-            t = Dep(string(name.args[1]), name.args[2].value)
-            t in f.pending_imports && delete!(f.pending_imports, t)
-        end
 
+        # Check that `name` is a complex expression (e.g., Foo.bar)
+        function_name = ""
+        if name isa Expr && name.head == Symbol(".")
+            function_name = string(name.args[1]) * "." * string(name.args[2].value)
+        elseif name isa Symbol
+            function_name = string(name)
+        else
+            @info "$(f.name) -- $name"
+            # @assert false
+        end
+        !isempty(function_name) && push!(f.function_defs, function_name)
     elseif e.head == :call && e.args[1] == :include
         push!(f.includes, joinpath(f.base_path, e.args[2]))
     elseif e.head == :import
@@ -213,6 +235,10 @@ function _walk(e::Expr, f::Info)
         end
     elseif e.head == :function
         in_function_def = false
+    elseif e.head == Symbol("=") && block_count == 0
+        in_function_def = false
+    elseif e.head == :block
+        block_count -= 1
     elseif e.head == Symbol("::")
         if in_function_def && e.args[1] isa Expr && e.args[1].head == :call && RETURN_COERSION in CONF
             push!(f.warns, "$(f.name): Return-type annotation in `$function_name` is a type-coersion")
