@@ -47,7 +47,12 @@ end
 
 const CONF = Set{ConfigOption}()
 
+in_function_def = false
+block_count = 0
+function_name = ""
+
 function lint(options::Vector)
+    global block_count
     empty!(CONF)
     union!(CONF, options)
 
@@ -61,6 +66,8 @@ function lint(options::Vector)
             path = joinpath(base, file)
             all_info[path] = f = Info(base_path = base, name = path)
             ast = Meta.parseall(read(path, String); filename = path)
+
+            block_count = 0 # TODO find why this does not automatically reset
             _walk(ast, f)
 
             for included_file in f.includes
@@ -86,25 +93,19 @@ function lint(options::Vector)
         end
     end
 
+    check2 = (dep::Dep, f::Info) -> begin
+        found = _find2(dep.root, string(dep.unit), f, all_info)
+        if !found && IMPORT_QUAL in CONF
+            push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep)")
+        end
+    end
+
     total_warns = 0
     for (fname, f) in all_info
         for dep in f.usings check(dep, f, "using") end
         for dep in f.imports check(dep, f, "import") end
 
-        if IMPORT_QUAL in CONF
-            for dep in f.pending_imports
-                unit_str = string(dep.unit)
-                # First search for `X.foo`
-                (dep.root * "." * unit_str) in f.function_defs && continue
-                # Then for `foo` alone -- warn
-                found = unit_str in f.function_defs
-                if found
-                    # @warn "$(f.name): Refrain from extending methods (`$unit_str`) without qualification"
-                    continue
-                end
-                push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep) (use only to extend)")
-            end
-        end
+        for dep in f.pending_imports check2(dep, f) end
 
         for w in f.warns @warn w end
         total_warns += length(f.warns)
@@ -121,6 +122,26 @@ function _find(dep::Dep, f::Info, all_info)
         haskey(all_info, included_file) || continue
         included_info = all_info[included_file]
         _find(dep, included_info, all_info) && return true
+    end
+    return false
+end
+
+function _find2(root::String, unit::String, f::Info, all_info)
+    # First search for defining `X.foo`
+    if (root * "." * unit) in f.function_defs
+        @info "$(f.name): Qualified extension of method (`$root.$unit`)"
+        return true
+    end
+    # Then for defining `foo` alone
+    if unit in f.function_defs
+        @info "$(f.name): Unqualified extension of method (`$unit`)"
+        return true
+    end
+
+    for included_file in f.includes
+        haskey(all_info, included_file) || continue
+        included_info = all_info[included_file]
+        _find2(root, unit, included_info, all_info) && return true
     end
     return false
 end
@@ -168,10 +189,6 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
     end
 end
 
-in_function_def = false
-block_count = 0
-function_name = ""
-
 function _walk(e::Expr, f::Info)
     global in_function_def, block_count, function_name
 
@@ -197,7 +214,7 @@ function _walk(e::Expr, f::Info)
     # A short form function definition has "=" as the head symbol
     elseif e.head == Symbol("=") && block_count == 0
         in_function_def = true
-    elseif e.head == :block
+    elseif e.head == :block && in_function_def
         block_count += 1
     # Function definitions are calls in the AST
     # Need to differentiate from normal method calls
@@ -212,7 +229,7 @@ function _walk(e::Expr, f::Info)
         elseif name isa Symbol
             function_name = string(name)
         else
-            @info "$(f.name) -- $name"
+            # @info "$(f.name) -- $name"
             # @assert false
         end
         !isempty(function_name) && push!(f.function_defs, function_name)
@@ -235,9 +252,10 @@ function _walk(e::Expr, f::Info)
         end
     elseif e.head == :function
         in_function_def = false
+        function_name = ""
     elseif e.head == Symbol("=") && block_count == 0
         in_function_def = false
-    elseif e.head == :block
+    elseif e.head == :block && in_function_def
         block_count -= 1
     elseif e.head == Symbol("::")
         if in_function_def && e.args[1] isa Expr && e.args[1].head == :call && RETURN_COERSION in CONF
