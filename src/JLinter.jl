@@ -215,6 +215,8 @@ function _walk(e::Expr, f::Info)
     # A short form function definition has "=" as the head symbol
     elseif e.head == Symbol("=") && block_count == 0
         in_function_def = true
+    elseif e.head == :macro
+        in_function_def = true
     elseif e.head == :block && in_function_def
         block_count += 1
     # Function definitions are calls in the AST
@@ -230,8 +232,7 @@ function _walk(e::Expr, f::Info)
         elseif name isa Symbol
             function_name = string(name)
         else
-            # @info "$(f.name) -- $name"
-            # @assert false
+            @assert name isa Expr && name.head == Symbol("::")
         end
         !isempty(function_name) && push!(f.function_defs, function_name)
     elseif e.head == :call && e.args[1] == :include
@@ -251,11 +252,9 @@ function _walk(e::Expr, f::Info)
         if parent_dir != "src" && parent_dir != string(f.mod) && MODULE_DIR_NAME in CONF
             push!(f.warns, "$(f.name): Module `$(f.mod)` doesn't match parent directory name (`$parent_dir`)")
         end
-    elseif e.head == :function
+    elseif e.head == :function || (e.head == Symbol("=") && block_count == 0) || e.head == :macro
         in_function_def = false
         function_name = ""
-    elseif e.head == Symbol("=") && block_count == 0
-        in_function_def = false
     elseif e.head == :block && in_function_def
         block_count -= 1
     elseif e.head == Symbol("::")
