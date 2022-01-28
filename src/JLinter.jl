@@ -94,7 +94,7 @@ function lint(options::Vector)
     end
 
     check2 = (dep::Dep, f::Info) -> begin
-        found = _find2(dep.root, string(dep.unit), f, all_info)
+        found = _find2(dep.root, string(dep.unit), f, all_info, "")
         if !found && IMPORT_QUAL in CONF
             push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep)")
         end
@@ -104,7 +104,6 @@ function lint(options::Vector)
     for (fname, f) in all_info
         for dep in f.usings check(dep, f, "using") end
         for dep in f.imports check(dep, f, "import") end
-
         for dep in f.pending_imports check2(dep, f) end
 
         for w in f.warns @warn w end
@@ -126,22 +125,24 @@ function _find(dep::Dep, f::Info, all_info)
     return false
 end
 
-function _find2(root::String, unit::String, f::Info, all_info)
+# TODO identify unqualified method extensions
+function _find2(root::String, unit::String, f::Info, all_info, parent::String)
+    suffix = isempty(parent) ? "" : " -- from file: $parent"
     # First search for defining `X.foo`
     if (root * "." * unit) in f.function_defs
-        @info "$(f.name): Qualified extension of method (`$root.$unit`)"
+        push!(f.warns, "$(f.name): Qualified extension of method (`$root.$unit`)$suffix")
         return true
     end
     # Then for defining `foo` alone
     if unit in f.function_defs
-        @info "$(f.name): Unqualified extension of method (`$unit`)"
+        push!(f.warns, "$(f.name): Unqualified extension of method (`$unit` -- $root)$suffix")
         return true
     end
 
     for included_file in f.includes
         haskey(all_info, included_file) || continue
         included_info = all_info[included_file]
-        _find2(root, unit, included_info, all_info) && return true
+        _find2(root, unit, included_info, all_info, f.name) && return true
     end
     return false
 end
