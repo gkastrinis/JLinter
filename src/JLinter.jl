@@ -14,7 +14,6 @@ function Base.show(io::IO, dep::Dep)
     print(io, ".")
     print(io, dep.unit)
 end
-
 Base.@kwdef mutable struct Info
     base_path::String
     name::String
@@ -31,6 +30,25 @@ Base.@kwdef mutable struct Info
     warns::Set{String} = Set{String}()
 end
 
+@enum Context begin
+    TOP
+    MODULE
+    STRUCT
+    FUNCTION
+    FUNCTION_PARAMS
+    FUNCTION_BODY
+end
+
+# `Dep` should only be constructed using this method
+function mk_dep(root::AbstractString, unit::Symbol, f::Info)
+    if startswith(root, ".") && LOAD_RELATIVE in CONF
+        push!(f.warns, "$(f.name): Refrain from using relative paths in module names ($root)")
+    end
+    return Dep(root = root, unit = unit)
+end
+
+#####################################################
+
 @enum ConfigOption begin
     LOAD_INDIRECT
     LOAD_UNUSED
@@ -45,16 +63,17 @@ end
 
 #####################################################
 
-const CONF = Set{ConfigOption}()
+using DataStructures: Stack
 
-in_function_def = false
-block_count = 0
-function_name = ""
+const CONF = Set{ConfigOption}()
+const CTX = Stack{Context}()
+const FUNC_NAMES = Stack{String}()
 
 function lint(options::Vector)
-    global block_count
     empty!(CONF)
     union!(CONF, options)
+    empty!(CTX)
+    empty!(FUNC_NAMES)
 
     all_info = Dict{String, Info}()
     included_by = Dict{String, String}()
@@ -67,8 +86,10 @@ function lint(options::Vector)
             all_info[path] = f = Info(base_path = base, name = path)
             ast = Meta.parseall(read(path, String); filename = path)
 
-            block_count = 0 # TODO find why this does not automatically reset
+            push!(CTX, TOP)
             _walk(ast, f)
+            @assert first(CTX) == TOP
+            pop!(CTX)
 
             for included_file in f.includes
                 @assert !haskey(included_by, included_file)
@@ -77,37 +98,11 @@ function lint(options::Vector)
         end
     end
 
-    check = (dep::Dep, f::Info, kind::String) -> begin
-        # `using`/`import` X: bar -> ... `bar`
-        # `using`/`import` X -> ... `X`
-        found = _find(dep, f, all_info)
-        if !found && haskey(included_by, f.name)
-            parent_info = all_info[included_by[f.name]]
-            found = _find(dep, parent_info, all_info)
-            if found && LOAD_INDIRECT in CONF
-                push!(f.warns, "($(f.name)): `$kind $dep` used indirectly")
-            end
-        end
-        if !found && LOAD_UNUSED in CONF
-            push!(f.warns, "($(f.name)): `$kind $dep` unused")
-        end
-    end
-
-    check2 = (dep::Dep, f::Info) -> begin
-        found = _find2(dep.root, string(dep.unit), f, all_info, "")
-        if !found && IMPORT_QUAL in CONF
-            push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep)")
-        end
-    end
-
     for (fname, f) in all_info
-        for dep in f.usings check(dep, f, "using") end
-        for dep in f.imports check(dep, f, "import") end
-        for dep in f.pending_imports check2(dep, f) end
-
-        for dep in f.usings
-            _find2("", string(dep.unit), f, all_info, "")
-        end
+        for dep in f.usings check_usage(dep, f, all_info, included_by, "using") end
+        for dep in f.imports check_usage(dep, f, all_info, included_by, "import") end
+        for dep in f.pending_imports check_defs(dep, f, all_info, included_by) end
+        # for dep in f.usings _find_def("", string(dep.unit), f, all_info, "") end
     end
 
     total_warns = 0
@@ -118,195 +113,7 @@ function lint(options::Vector)
     @info "Total Warnings: $total_warns"
 end
 
-
-function _find(dep::Dep, f::Info, all_info)
-    filter = (dep.unit == DUMMY_SYM ? last(split(dep.root, ".")) : dep.unit)
-    (filter in f.symbols) && return true
-
-    for included_file in f.includes
-        haskey(all_info, included_file) || continue
-        included_info = all_info[included_file]
-        _find(dep, included_info, all_info) && return true
-    end
-    return false
-end
-
-# TODO identify unqualified method extensions
-function _find2(root::String, unit::String, f::Info, all_info, parent::String)
-    suffix = isempty(parent) ? "" : " -- from: $parent"
-    # First search for defining `X.foo`
-    if !isempty(root) && (root * "." * unit) in f.function_defs
-        push!(f.warns, "$(f.name): Qualified extension of method (`$root.$unit`)$suffix")
-        return true
-    end
-    # Then for defining `foo` alone
-    if unit in f.function_defs
-        maybe_root = isempty(root) ? "" : " -- $root"
-        push!(f.warns, "$(f.name): Unqualified extension of method (`$unit`$maybe_root)$suffix")
-        return true
-    end
-
-    for included_file in f.includes
-        haskey(all_info, included_file) || continue
-        included_info = all_info[included_file]
-        _find2(root, unit, included_info, all_info, f.name) && return true
-    end
-    return false
-end
-
-function mk_dep(root::AbstractString, unit::Symbol, f::Info)
-    if startswith(root, ".") && LOAD_RELATIVE in CONF
-        push!(f.warns, "$(f.name): Refrain from using relative paths in module names ($root)")
-    end
-    return Dep(root = root, unit = unit)
-end
-
-# import Foo OK
-# using Foo: bar OK
-# using Foo NOT
-# import Foo: bar NOT
-# import Foo, Bar NOT
-function _load(e::Expr, collection::Set{Dep}, f::Info)
-    if e.args[1].head == Symbol(":")
-        @assert length(e.args) == 1
-        base = e.args[1]
-        root = _join(base.args[1].args)
-        units = @view base.args[2:end]
-        for arg in units
-            @assert arg.head == Symbol(".")
-            @assert length(arg.args) == 1
-            push!(collection, mk_dep(root, Symbol(_join(arg.args)), f))
-        end
-        if e.head == :import && IMPORT_QUAL in CONF
-            for unit in units
-                @assert length(unit.args) == 1
-                push!(f.pending_imports, mk_dep(split(root, ".")[end], unit.args[1], f))
-            end
-        end
-    else
-        if e.head == :using && USING_UNQUAL in CONF
-            push!(f.warns, "$(f.name): Refrain from using unqualified `using` ($(_str(e.args)))")
-        end
-        if length(e.args) > 1 && IMPORT_MULTIPLE in CONF
-            push!(f.warns, "$(f.name): Unqualified `import` has multiple IDs ($(_str(e.args))) in one line")
-        end
-        for arg in e.args
-            @assert arg.head == Symbol(".")
-            push!(collection, mk_dep(_join(arg.args), DUMMY_SYM, f))
-        end
-    end
-end
-
-function _walk(e::Expr, f::Info)
-    global in_function_def, block_count, function_name
-
-    @assert e.head isa Symbol
-    if e.head == :module
-        @assert e.args[1] == true
-        @assert e.args[3] isa Expr
-        @assert length(e.args) == 3
-        @assert f.mod == DUMMY_SYM
-
-        push!(f.mods, e.args[2])
-        f.mod = e.args[2]
-    elseif e.head == :function
-        in_function_def = true
-        # It has a non-trivial body
-        if length(e.args) > 1
-            @assert e.args[2].head == :block
-            l = last(e.args[2].args)
-            if !(l isa Expr && l.head == :return) && RETURN_IMPLICIT in CONF
-                push!(f.warns, "$(f.name): Explicit `return` missing in `$name`")
-            end
-        end
-    # A short form function definition has "=" as the head symbol
-    elseif e.head == Symbol("=") && block_count == 0
-        in_function_def = true
-    elseif e.head == :macro
-        in_function_def = true
-    elseif e.head == :block && in_function_def
-        block_count += 1
-    # Function definitions are calls in the AST
-    # Need to differentiate from normal method calls
-    elseif in_function_def && block_count == 0 && e.head == :call
-        name = e.args[1]
-        name = (name isa Expr && name.head == :curly) ? name.args[1] : name
-
-        # Check that `name` is a complex expression (e.g., Foo.bar)
-        function_name = ""
-        if name isa Expr && name.head == Symbol(".")
-            function_name = string(name.args[1]) * "." * string(name.args[2].value)
-        elseif name isa Symbol
-            function_name = string(name)
-        else
-            @assert name isa Expr && name.head == Symbol("::")
-        end
-        !isempty(function_name) && push!(f.function_defs, function_name)
-    elseif e.head == :call && e.args[1] == :include
-        push!(f.includes, joinpath(f.base_path, e.args[2]))
-    elseif e.head == :import
-        _load(e, f.imports, f)
-    elseif e.head == :using
-        _load(e, f.usings, f)
-    elseif e.head == :export
-        union!(f.exports, e.args)
-    end
-
-    _walk(e.args, f)
-
-    if e.head == :module
-        parent_dir = splitpath(f.name)[end-1]
-        if parent_dir != "src" && parent_dir != string(f.mod) && MODULE_DIR_NAME in CONF
-            push!(f.warns, "$(f.name): Module `$(f.mod)` doesn't match parent directory name (`$parent_dir`)")
-        end
-    elseif e.head == :function || (e.head == Symbol("=") && block_count == 0) || e.head == :macro
-        in_function_def = false
-        function_name = ""
-    elseif e.head == :block && in_function_def
-        block_count -= 1
-    elseif e.head == Symbol("::")
-        if in_function_def && e.args[1] isa Expr && e.args[1].head == :call && RETURN_COERSION in CONF
-            push!(f.warns, "$(f.name): Return-type annotation in `$function_name` is a type-coersion")
-        end
-    end
-end
-
-_walk(s::Symbol, f::Info) = push!(f.symbols, s)
-
-_walk(args::Array, f::Info) = for arg in args _walk(arg, f) end
-
-function _walk(ref::GlobalRef, f::Info)
-    @assert ref.mod == Core
-    @assert ref.name in [Symbol("@doc"), Symbol("@cmd")]
-    return nothing
-end
-
-_walk(l::LineNumberNode, f::Info) = nothing
-
-function _walk(q::QuoteNode, f::Info)
-    q.value isa Symbol || return
-    push!(f.symbols, q.value)
-end
-
-_walk(a, f::Info) = nothing
-
-function _join(args::Array)
-    length(args) == 1 && return string(args[1])
-    foldl((x, y) -> begin
-        str_x = string(x)
-        str_y = string(y)
-        startswith(str_x, ".") && return str_x * str_y
-        return str_x * "." * str_y
-    end, args)
-end
-
-_join(e::Expr) = _join(e.args)
-
-_join(e::AbstractString) = e
-
-function _str(args::AbstractArray)
-    length(args) == 1 && return _join(args[1].args)
-    reduce((x, y) -> begin _join(x) * ", " * _join(y) end, args)
-end
+include("walk.jl")
+include("checks.jl")
 
 end
