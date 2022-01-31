@@ -100,12 +100,18 @@ function lint(options::Vector)
         end
     end
 
-    total_warns = 0
     for (fname, f) in all_info
         for dep in f.usings check(dep, f, "using") end
         for dep in f.imports check(dep, f, "import") end
         for dep in f.pending_imports check2(dep, f) end
 
+        for dep in f.usings
+            _find2("", string(dep.unit), f, all_info, "")
+        end
+    end
+
+    total_warns = 0
+    for (fname, f) in all_info
         for w in f.warns @warn w end
         total_warns += length(f.warns)
     end
@@ -127,15 +133,16 @@ end
 
 # TODO identify unqualified method extensions
 function _find2(root::String, unit::String, f::Info, all_info, parent::String)
-    suffix = isempty(parent) ? "" : " -- from file: $parent"
+    suffix = isempty(parent) ? "" : " -- from: $parent"
     # First search for defining `X.foo`
-    if (root * "." * unit) in f.function_defs
+    if !isempty(root) && (root * "." * unit) in f.function_defs
         push!(f.warns, "$(f.name): Qualified extension of method (`$root.$unit`)$suffix")
         return true
     end
     # Then for defining `foo` alone
     if unit in f.function_defs
-        push!(f.warns, "$(f.name): Unqualified extension of method (`$unit` -- $root)$suffix")
+        maybe_root = isempty(root) ? "" : " -- $root"
+        push!(f.warns, "$(f.name): Unqualified extension of method (`$unit`$maybe_root)$suffix")
         return true
     end
 
