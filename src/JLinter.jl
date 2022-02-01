@@ -27,6 +27,7 @@ Base.@kwdef mutable struct Info
     function_defs::Set{String} = Set{String}()
 
     pending_imports::Set{Dep} = Set{Dep}()
+    flat_usings::Set{String} = Set{String}()
     warns::Set{String} = Set{String}()
 end
 
@@ -44,6 +45,7 @@ function mk_dep(root::AbstractString, unit::Symbol, f::Info)
     if startswith(root, ".") && LOAD_RELATIVE in CONF
         push!(f.warns, "$(f.name): Refrain from using relative paths in module names ($root)")
     end
+    @assert !(isempty(root) && isempty(string(unit)))
     return Dep(root = root, unit = unit)
 end
 
@@ -56,6 +58,7 @@ end
     IMPORT_MULTIPLE
     IMPORT_QUAL
     USING_UNQUAL
+    EXTEND_UNQUAL
     MODULE_DIR_NAME
     RETURN_IMPLICIT
     RETURN_COERSION
@@ -81,6 +84,7 @@ function lint(options::Vector)
     for (base, dirs, files) in walkdir("src")
         for file in files
             endswith(file, ".jl") || continue
+            # contains(base, "Vectorized") || continue
 
             path = joinpath(base, file)
             all_info[path] = f = Info(base_path = base, name = path)
@@ -95,14 +99,26 @@ function lint(options::Vector)
                 @assert !haskey(included_by, included_file)
                 included_by[included_file] = f.name
             end
+            for dep in f.usings
+                dep.unit == DUMMY_SYM && continue
+                push!(f.flat_usings, string(dep.unit))
+            end
         end
     end
 
     for (fname, f) in all_info
         for dep in f.usings check_usage(dep, f, all_info, included_by, "using") end
         for dep in f.imports check_usage(dep, f, all_info, included_by, "import") end
-        for dep in f.pending_imports check_defs(dep, f, all_info, included_by) end
-        # for dep in f.usings _find_def("", string(dep.unit), f, all_info, "") end
+
+        for dep in f.pending_imports
+            found = _find_def(dep.root, string(dep.unit), f, all_info, "")
+            if !found && IMPORT_QUAL in CONF # TODO Why here
+                push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep)")
+            end
+        end
+        for func in f.function_defs
+            check_extends(func, f, all_info, included_by, f.name)
+        end
     end
 
     total_warns = 0

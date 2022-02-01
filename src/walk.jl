@@ -39,7 +39,7 @@ function _walk(e::Expr, f::Info)
             pop!(FUNC_NAMES)
             pop!(CTX)
         end
-    elseif e.head == :parameters && first(CTX) == FUNCTION
+    elseif (e.head == :parameters || e.head == :kw) && first(CTX) == FUNCTION
         push!(CTX, FUNCTION_PARAMS)
         _walk(e.args, f)
         pop!(CTX)
