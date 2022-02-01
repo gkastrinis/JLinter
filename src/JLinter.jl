@@ -52,11 +52,12 @@ end
 #####################################################
 
 @enum ConfigOption begin
+    IMPORT_MULTIPLE
+    LOAD_RELATIVE
+    IMPORT_QUAL
+
     LOAD_INDIRECT
     LOAD_UNUSED
-    LOAD_RELATIVE
-    IMPORT_MULTIPLE
-    IMPORT_QUAL
     USING_UNQUAL
     EXTEND_UNQUAL
     MODULE_DIR_NAME
@@ -66,7 +67,7 @@ end
 
 #####################################################
 
-using DataStructures: Stack
+using DataStructures: Queue, Stack, enqueue!
 
 const CONF = Set{ConfigOption}()
 const CTX = Stack{Context}()
@@ -84,7 +85,6 @@ function lint(options::Vector)
     for (base, dirs, files) in walkdir("src")
         for file in files
             endswith(file, ".jl") || continue
-            # contains(base, "Vectorized") || continue
 
             path = joinpath(base, file)
             all_info[path] = f = Info(base_path = base, name = path)
@@ -107,17 +107,17 @@ function lint(options::Vector)
     end
 
     for (fname, f) in all_info
-        for dep in f.usings check_usage(dep, f, all_info, included_by, "using") end
-        for dep in f.imports check_usage(dep, f, all_info, included_by, "import") end
-
+        for dep in f.usings
+            check_usage(dep, f, all_info, included_by, "using")
+        end
+        for dep in f.imports
+            check_usage(dep, f, all_info, included_by, "import")
+        end
         for dep in f.pending_imports
-            found = _find_def(dep.root, string(dep.unit), f, all_info, "")
-            if !found && IMPORT_QUAL in CONF # TODO Why here
-                push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep)")
-            end
+            check_defs(dep.root, string(dep.unit), f, all_info, "")
         end
         for func in f.function_defs
-            check_extends(func, f, all_info, included_by, f.name)
+            check_extends(func, f, all_info, included_by, Queue{String}())
         end
     end
 

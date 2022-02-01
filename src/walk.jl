@@ -155,12 +155,11 @@ function _load(e::Expr, collection::Set{Dep}, f::Info)
         for arg in units
             @assert arg.head == Symbol(".")
             @assert length(arg.args) == 1
-            push!(collection, mk_dep(root, Symbol(_join(arg.args)), f))
-        end
-        if e.head == :import && IMPORT_QUAL in CONF
-            for unit in units
-                @assert length(unit.args) == 1
-                push!(f.pending_imports, mk_dep(split(root, ".")[end], unit.args[1], f))
+            dep = mk_dep(root, Symbol(_join(arg.args)), f)
+            push!(collection, dep)
+            if e.head == :import && IMPORT_QUAL in CONF
+                push!(f.warns, "$(f.name): Refrain from using qualified `import` ($dep)")
+                push!(f.pending_imports, mk_dep(split(root, ".")[end], arg.args[1], f))
             end
         end
     else

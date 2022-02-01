@@ -34,7 +34,7 @@ function _find_use(dep::Dep, f::Info, all_info::Dict{String, Info})
     return false
 end
 
-function _find_def(root::String, unit::String, f::Info, all_info::Dict{String, Info}, parent::String)
+function check_defs(root::String, unit::String, f::Info, all_info::Dict{String, Info}, parent::String)
     suffix = isempty(parent) ? "" : " -- from: $parent"
     # First search for defining `X.foo`
     if !isempty(root) && (root * "." * unit) in f.function_defs
@@ -55,7 +55,7 @@ function _find_def(root::String, unit::String, f::Info, all_info::Dict{String, I
     for included_file in f.includes
         haskey(all_info, included_file) || continue
         included_info = all_info[included_file]
-        _find_def(root, unit, included_info, all_info, f.name) && return true
+        check_defs(root, unit, included_info, all_info, f.name) && return true
     end
     return false
 end
@@ -65,18 +65,19 @@ function check_extends(
     f::Info,
     all_info::Dict{String, Info},
     included_by::Dict{String, String},
-    from::String
+    include_queue::Queue{String}
 )
-    suffix = f.name == from ? "" : " -- from: $(f.name)"
+    suffix = isempty(include_queue) ? "" : " -- from: $(join(include_queue, ", "))"
     if fname in f.flat_usings
         if EXTEND_UNQUAL in CONF
-            push!(f.warns, "$(from): Unqualified extension of method `$fname`$suffix")
+            push!(f.warns, "$(f.name): Unqualified extension of method `$fname`$suffix")
         end
         return true
     end
     if haskey(included_by, f.name)
         parent_info = all_info[included_by[f.name]]
-        return check_extends(fname, parent_info, all_info, included_by, from)
+        enqueue!(include_queue, f.name)
+        return check_extends(fname, parent_info, all_info, included_by, include_queue)
     end
     return false
 end
