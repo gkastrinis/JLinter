@@ -52,15 +52,16 @@ end
 #####################################################
 
 @enum ConfigOption begin
+    ALL
     IMPORT_MULTIPLE
     LOAD_RELATIVE
     IMPORT_QUAL
+    MODULE_DIR_NAME
 
     LOAD_INDIRECT
     LOAD_UNUSED
     USING_UNQUAL
     EXTEND_UNQUAL
-    MODULE_DIR_NAME
     RETURN_IMPLICIT
     RETURN_COERSION
 end
@@ -75,7 +76,7 @@ const FUNC_NAMES = Stack{String}()
 
 function lint(options::Vector)
     empty!(CONF)
-    union!(CONF, options)
+    union!(CONF, ALL in options ? instances(ConfigOption) : options)
     empty!(CTX)
     empty!(FUNC_NAMES)
 
