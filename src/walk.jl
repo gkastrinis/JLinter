@@ -51,10 +51,10 @@ function _walk(e::Expr, f::Info)
         push!(FUNC_NAMES, fname)
         _walk(e.args, f)
     elseif e.head == Symbol("::")
+        _walk(e.args, f)
         if first(CTX) == FUNCTION && e.args[1] isa Expr && e.args[1].head == :call && RETURN_COERSION in CONF
             push!(f.warns, "$(f.name): Return-type annotation in `$(first(FUNC_NAMES))` is a type-coersion")
         end
-        _walk(e.args, f)
     elseif e.head == :block && first(CTX) == FUNCTION
         push!(CTX, FUNCTION_BODY)
         _walk(e.args, f)

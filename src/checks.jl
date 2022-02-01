@@ -14,7 +14,7 @@ function check_usage(
             parent_info = all_info[included_by[f.name]]
             found = _find_use(dep, parent_info, all_info)
             if found && LOAD_INDIRECT in CONF
-                push!(f.warns, "($(f.name)): `$kind $dep` used indirectly")
+                push!(f.warns, "($(f.name)): `$kind $dep` used indirectly ($(parent_info.name))")
             end
         end
 

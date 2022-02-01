@@ -56,14 +56,15 @@ end
     IMPORT_MULTIPLE
     LOAD_RELATIVE
     IMPORT_QUAL
+
     MODULE_DIR_NAME
+    RETURN_COERSION
+    RETURN_IMPLICIT
 
     LOAD_INDIRECT
     LOAD_UNUSED
     USING_UNQUAL
     EXTEND_UNQUAL
-    RETURN_IMPLICIT
-    RETURN_COERSION
 end
 
 #####################################################
